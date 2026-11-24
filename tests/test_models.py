@@ -317,3 +317,115 @@ def test_multi_database_foreign_key_resolution():
 
     field = ctx.get_field("MY_DATABASE.SILVER.ORDERS", "USER_ID")
     assert field["id"] == 2
+
+
+def _export_nested(core: MockDbtMetabase, columns: list[Column]) -> Mock:
+    mock_metabase = Mock()
+    mock_metabase.find_database.return_value = {"id": 1}
+    mock_metabase.get_database_metadata.return_value = {
+        "engine": "bigquery",
+        "details": {"dataset-id": "shop"},
+        "tables": [
+            {
+                "id": 1,
+                "name": "orders",
+                "schema": None,
+                "fields": [
+                    {"id": 1, "name": "total", "fk_target_field_id": None},
+                    {"id": 2, "name": "shipping", "fk_target_field_id": None},
+                    {
+                        "id": 3,
+                        "name": "address",
+                        "nfc_path": ["shipping"],
+                        "fk_target_field_id": None,
+                    },
+                    {
+                        "id": 4,
+                        "name": "zip",
+                        "nfc_path": ["shipping", "address"],
+                        "fk_target_field_id": None,
+                    },
+                    {
+                        "id": 5,
+                        "name": "total",
+                        "nfc_path": ["shipping"],
+                        "fk_target_field_id": None,
+                    },
+                ],
+            },
+        ],
+    }
+
+    core._metabase = mock_metabase
+    core._manifest._models = [
+        Model(
+            database="db",
+            schema="shop",
+            group=Group.nodes,
+            name="orders",
+            alias="orders",
+            columns=columns,
+        )
+    ]
+
+    core.export_models(metabase_database="db", sync_timeout=1)
+
+    return mock_metabase
+
+
+def _field_updates(mock_metabase: Mock) -> dict:
+    return {
+        c.kwargs["uid"]: c.kwargs["body"]
+        for c in mock_metabase.update_field.call_args_list
+    }
+
+
+def test_build_tables_nested_fields():
+    tables = _build_tables(
+        metadata={
+            "tables": [
+                {
+                    "name": "orders",
+                    "schema": "shop",
+                    "fields": [
+                        {"id": 1, "name": "total", "nfc_path": None},
+                        {"id": 2, "name": "zip", "nfc_path": ["shipping", "address"]},
+                        {"id": 3, "name": "total", "nfc_path": ["shipping"]},
+                    ],
+                }
+            ]
+        }
+    )
+
+    fields = tables["SHOP.ORDERS"]["fields"]
+    assert {k: v["id"] for k, v in fields.items()} == {
+        "TOTAL": 1,
+        "SHIPPING.ADDRESS.ZIP": 2,
+        "SHIPPING.TOTAL": 3,
+    }
+
+
+def test_export_nested_column(core: MockDbtMetabase):
+    """Dotted dbt column (nested BigQuery field) syncs and gets its description."""
+
+    mock_metabase = _export_nested(
+        core,
+        columns=[
+            Column(name="shipping.address.zip", description="Postal code"),
+        ],
+    )
+
+    assert _field_updates(mock_metabase)[4]["description"] == "Postal code"
+
+
+def test_export_nested_name_collision(core: MockDbtMetabase):
+    """Top-level column is not confused with a nested field of the same name."""
+
+    mock_metabase = _export_nested(
+        core,
+        columns=[Column(name="total", description="Order total")],
+    )
+
+    updates = _field_updates(mock_metabase)
+    assert updates[1]["description"] == "Order total"
+    assert 5 not in updates

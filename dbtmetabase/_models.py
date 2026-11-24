@@ -490,8 +490,9 @@ def _build_tables(metadata: Mapping) -> Mapping[str, MutableMapping]:
             new_field = field.copy()
             new_field["kind"] = "field"
 
-            field_name = field["name"].upper()
-            fields[field_name] = new_field
+            # Nested fields (e.g. BigQuery STRUCT) are keyed by full dotted path
+            field_path = (field.get("nfc_path") or []) + [field["name"]]
+            fields[".".join(field_path).upper()] = new_field
 
         new_table = table.copy()
         new_table["kind"] = "table"
